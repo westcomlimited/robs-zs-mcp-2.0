@@ -490,6 +490,12 @@ class ZPAService(BaseService):
             zpa_list_service_edges,
             zpa_update_service_edge,
         )
+        from .tools.zpa.user_sessions import (
+            zpa_get_active_session_count,
+            zpa_get_user_activity,
+            zpa_list_active_sessions,
+            zpa_list_user_activity,
+        )
 
         # Define read-only tools
         self.read_tools = [
@@ -765,6 +771,26 @@ class ZPAService(BaseService):
                 "func": zpa_list_lss_client_types,
                 "name": "zpa_list_lss_client_types",
                 "description": "List ZPA LSS client types for the current customer (e.g. web_browser, client_connector, machine_tunnel, zpa_lss). Returns the human-readable name → internal identifier mapping used in LSS policy-rule conditions (read-only).",
+            },
+            {
+                "func": zpa_list_active_sessions,
+                "name": "zpa_list_active_sessions",
+                "description": "List currently active ZPA user sessions (user connections). Returns each connected user with tunnel state, app connector, application segment, client IP, ZEN node, and session timestamps. Use to see who is connected to ZPA right now. Supports JMESPath client-side filtering via the query parameter (read-only).",
+            },
+            {
+                "func": zpa_get_active_session_count,
+                "name": "zpa_get_active_session_count",
+                "description": "Return the total number of currently active ZPA user sessions as a single integer. Lightweight — use for dashboards, Teams/Slack notifications, or any time only a count is needed rather than the full session list (read-only).",
+            },
+            {
+                "func": zpa_list_user_activity,
+                "name": "zpa_list_user_activity",
+                "description": "List ZPA user activity records — app segment accessed, connector used, bytes transferred, session duration. Use for access auditing, capacity planning, and security investigations. Supports JMESPath client-side filtering via the query parameter (read-only).",
+            },
+            {
+                "func": zpa_get_user_activity,
+                "name": "zpa_get_user_activity",
+                "description": "Get ZPA activity records for a specific user by user ID. Returns full access history — which apps, which connectors, session details. Use when investigating a specific user (read-only).",
             },
         ]
 

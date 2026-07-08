@@ -37,6 +37,14 @@ from zscaler_mcp.common.jmespath_utils import apply_jmespath
 # Simple in-process token cache {token, expires_at}
 _token_cache: Dict = {"token": None, "expires_at": 0}
 
+# Infrastructure session usernames to exclude from user-facing results
+_ANCHORING_NAMES = {"ZPA IP Anchoring"}
+
+
+def _filter_infrastructure(users: list) -> list:
+    """Remove ZPA infrastructure sessions (IP Anchoring etc.) from a user list."""
+    return [u for u in users if u.get("userName") not in _ANCHORING_NAMES]
+
 
 def _get_cloud_prefix() -> str:
     """Return the ZPA cloud prefix (e.g. 'us4') from env."""
@@ -151,15 +159,17 @@ def zpa_get_active_session_count(
     cloud = _get_cloud_prefix()
     customer_id = _get_customer_id(client)
 
+    # Fetch up to 500 sessions to filter out infrastructure (IP Anchoring etc.)
     url = (
         f"https://{cloud}-zpa-health-proxy.private.zscaler.com"
         f"/health/{customer_id}/users"
-        f"?scopeId=0&page=1&pagesize=1"
+        f"?scopeId=0&page=1&pagesize=500"
     )
     data = _portal_get(url, token)
+    users = _filter_infrastructure(data.get("users", []))
 
     return {
-        "active_session_count": int(data.get("total", 0)),
+        "active_session_count": len(users),
         "source_endpoint": url,
     }
 
@@ -205,10 +215,9 @@ def zpa_list_active_sessions(
     )
     data = _portal_get(url, token)
 
-    sessions = data.get("users", data)
-    total = data.get("total", None)
+    sessions = _filter_infrastructure(data.get("users", []))
 
-    result = {"total": int(total) if total is not None else None, "users": sessions}
+    result = {"total": len(sessions), "users": sessions}
     return apply_jmespath(result, query)
 
 

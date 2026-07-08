@@ -1,106 +1,130 @@
 """
-ZPA User Sessions & Activity Tools
-===================================
-Covers ZPA reporting/session endpoints NOT exposed by the upstream
-zscaler-mcp-server.  All tools are read-only.
+ZPA User Sessions & Activity Tools — v2
+========================================
+Endpoints discovered from ZPA Admin Portal HAR capture (admin.private.zscaler.com).
 
-Endpoints wrapped:
-  GET /zpa/mgmtconfig/v1/admin/customers/{id}/userActivity
-  GET /zpa/mgmtconfig/v1/admin/customers/{id}/userConnections
-  GET /zpa/mgmtconfig/v1/admin/customers/{id}/userActivity/{userId}
+Health-proxy (active sessions):
+  GET https://{cloud}-zpa-health-proxy.private.zscaler.com/health/{customerId}/users
+  Response: {"total": "4", "users": [...]}
 
-These APIs are present in the ZPA platform but absent from the official
-Python SDK, so we reach through to the underlying request executor directly
-(same pattern used by CustomerControllerAPI in the SDK).
+Recent-activity (time-windowed):
+  GET https://{cloud}-zpa-ras.private.zscaler.com/api/recent-activity/customers/{customerId}/recentusers/from/{ts}/to/{ts}
+  Response: {"pages": 1, "totalUsers": 4, "users": [...]}
+
+These are NOT mgmtconfig endpoints — they live on separate portal service hosts.
+Auth is the same OAuth2 Bearer token the SDK obtains, extracted via create_request().
+
+Required .env additions:
+  ZSCALER_ZPA_CLOUD_PREFIX=us4    <- cloud/region prefix for your tenant
 """
 
 import os
-from typing import Annotated, Dict, List, Optional
+import time
+from typing import Annotated, Dict, Optional
 
+import requests
 from pydantic import Field
-from zscaler.utils import format_url
 
 from zscaler_mcp.client import get_zscaler_client
 from zscaler_mcp.common.jmespath_utils import apply_jmespath
 
 
-def _get_zpa_base(client) -> str:
-    """Derive the per-customer ZPA mgmtconfig base path from the client config."""
+# =============================================================================
+# Internal helpers
+# =============================================================================
+
+def _get_cloud_prefix() -> str:
+    """Return the ZPA cloud prefix (e.g. 'us4') from env."""
+    prefix = os.environ.get("ZSCALER_ZPA_CLOUD_PREFIX", "").strip()
+    if not prefix:
+        raise ValueError(
+            "ZSCALER_ZPA_CLOUD_PREFIX is not set. "
+            "Add it to your .env (e.g. ZSCALER_ZPA_CLOUD_PREFIX=us4)."
+        )
+    return prefix
+
+
+def _get_customer_id(client) -> str:
+    """Derive customer ID from SDK config or env."""
     customer_id = (
         client.zpa._config.get("client", {}).get("customerId")
         or os.environ.get("ZSCALER_CUSTOMER_ID")
     )
     if not customer_id:
         raise ValueError(
-            "ZSCALER_CUSTOMER_ID is not set. "
-            "Add it to your .env file or pass customer_id explicitly."
+            "ZSCALER_CUSTOMER_ID is not set. Add it to your .env file."
         )
-    return f"/zpa/mgmtconfig/v1/admin/customers/{customer_id}"
+    return str(customer_id)
 
 
-def _raw_get(client, path: str, query_params: Optional[Dict] = None) -> Dict:
-    """Execute a raw GET against the ZPA API using the SDK's request executor."""
+def _get_bearer_token(client) -> str:
+    """
+    Extract the current OAuth2 Bearer token from the ZPA SDK client.
+
+    Strategy (in order):
+    1. Intercept via create_request() -- uses the SDK's live auth flow,
+       guaranteed to return a valid non-expired token.
+    2. Walk common internal attribute paths across SDK versions.
+    3. Fall back to ZSCALER_ZPA_BEARER_TOKEN env var (manual override).
+    """
     req_exec = client.zpa._request_executor
-    url = format_url(path)
 
-    request, error = req_exec.create_request("GET", url, {}, {})
-    if error:
-        raise Exception(f"Failed to build request for {path}: {error}")
+    # Strategy 1: ask the SDK to build a lightweight request and read the header
+    try:
+        dummy_url = "/zpa/mgmtconfig/v1/admin/customers/0/applicationSegment"
+        req, error = req_exec.create_request("GET", dummy_url, {}, {})
+        if not error and req is not None:
+            headers = getattr(req, "headers", {}) or {}
+            for key, val in headers.items():
+                if key.lower() == "authorization" and val.startswith("Bearer "):
+                    return val[len("Bearer "):]
+    except Exception:
+        pass
 
-    response, error = req_exec.execute(request, dict)
-    if error:
-        raise Exception(f"ZPA API request failed [{path}]: {error}")
+    # Strategy 2: common internal attribute paths across SDK versions
+    candidates = [
+        ("_access_token",),
+        ("_token",),
+        ("_http_client", "_access_token"),
+        ("_http_client", "access_token"),
+        ("_http_client", "_token"),
+        ("_auth", "_access_token"),
+    ]
+    for path in candidates:
+        try:
+            obj = req_exec
+            for attr in path:
+                obj = getattr(obj, attr)
+            if obj and isinstance(obj, str) and obj.startswith("ey"):
+                return obj
+        except AttributeError:
+            continue
 
-    return response.get_body()
+    # Strategy 3: manual env var fallback
+    manual = os.environ.get("ZSCALER_ZPA_BEARER_TOKEN", "").strip()
+    if manual:
+        return manual
+
+    raise RuntimeError(
+        "Could not extract Bearer token from ZPA SDK. "
+        "Set ZSCALER_ZPA_BEARER_TOKEN in your .env as a fallback, "
+        "or open a GitHub issue with your SDK version."
+    )
 
 
-# =============================================================================
-# zpa_list_active_sessions
-# =============================================================================
-
-def zpa_list_active_sessions(
-    page: Annotated[
-        Optional[int],
-        Field(ge=1, description="Page number for pagination (default: 1)."),
-    ] = None,
-    page_size: Annotated[
-        Optional[int],
-        Field(ge=1, le=500, description="Results per page (default: 20, max: 500)."),
-    ] = None,
-    query: Annotated[
-        Optional[str],
-        Field(description="JMESPath expression for client-side filtering/projection."),
-    ] = None,
-    service: Annotated[str, Field(description="Service to use.")] = "zpa",
-) -> Dict:
-    """
-    List currently active ZPA user sessions (user connections).
-
-    Returns each connected user with their tunnel state, app connector,
-    application segment, client IP, ZEN node, and session timestamps.
-    Useful for answering 'how many users are connected to ZPA right now'
-    and for per-user session debugging.
-
-    Supports JMESPath client-side filtering via the query parameter.
-    """
-    client = get_zscaler_client(service=service)
-    base = _get_zpa_base(client)
-    path = f"{base}/userConnections"
-
-    # Build query string manually — raw executor takes a plain URL
-    params = []
-    if page is not None:
-        params.append(f"page={page}")
-    if page_size is not None:
-        params.append(f"pagesize={page_size}")
-    if params:
-        path = f"{path}?{'&'.join(params)}"
-
-    result = _raw_get(client, path)
-
-    # The API wraps results in a 'list' key with 'totalPages' metadata
-    sessions = result if isinstance(result, list) else result.get("list", result)
-    return apply_jmespath(sessions, query)
+def _portal_get(url: str, token: str) -> Dict:
+    """Authenticated GET against a ZPA portal service endpoint."""
+    resp = requests.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        },
+        timeout=15,
+        verify=True,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 # =============================================================================
@@ -113,26 +137,77 @@ def zpa_get_active_session_count(
     """
     Return the total number of currently active ZPA user sessions.
 
-    Calls the same userConnections endpoint but returns only the count
-    and a summary — useful for dashboards and Teams/Slack notifications
-    without pulling the full session list.
+    Uses the ZPA health-proxy API (us4-zpa-health-proxy.private.zscaler.com)
+    discovered from portal HAR capture. Lightweight -- returns a single integer
+    count. Use this for dashboards, Teams/Slack notifications, or any time you
+    only need a count rather than the full session list (read-only).
+
+    Requires ZSCALER_ZPA_CLOUD_PREFIX in .env (e.g. us4).
     """
     client = get_zscaler_client(service=service)
-    base = _get_zpa_base(client)
-    result = _raw_get(client, f"{base}/userConnections?pagesize=1")
+    token = _get_bearer_token(client)
+    cloud = _get_cloud_prefix()
+    customer_id = _get_customer_id(client)
 
-    total = result.get("totalCount") or result.get("total") or 0
-    # Fall back to counting the list if the API doesn't return a totalCount
-    if not total and isinstance(result.get("list"), list):
-        # Fetch a larger page to get a real count
-        full = _raw_get(client, f"{base}/userConnections?pagesize=500")
-        session_list = full.get("list", [])
-        total = full.get("totalCount") or len(session_list)
+    url = (
+        f"https://{cloud}-zpa-health-proxy.private.zscaler.com"
+        f"/health/{customer_id}/users"
+        f"?scopeId=0&page=1&pagesize=1"
+    )
+    data = _portal_get(url, token)
 
     return {
-        "active_session_count": total,
-        "source_endpoint": f"{base}/userConnections",
+        "active_session_count": int(data.get("total", 0)),
+        "source_endpoint": url,
     }
+
+
+# =============================================================================
+# zpa_list_active_sessions
+# =============================================================================
+
+def zpa_list_active_sessions(
+    page: Annotated[
+        Optional[int],
+        Field(ge=1, description="Page number (default: 1)."),
+    ] = 1,
+    page_size: Annotated[
+        Optional[int],
+        Field(ge=1, le=500, description="Results per page (default: 30, max: 500)."),
+    ] = 30,
+    query: Annotated[
+        Optional[str],
+        Field(description="JMESPath expression for client-side filtering/projection."),
+    ] = None,
+    service: Annotated[str, Field(description="Service to use.")] = "zpa",
+) -> Dict:
+    """
+    List currently active ZPA user sessions via the health-proxy API.
+
+    Returns each connected user with tunnel state, app connector, application
+    segment, client IP, ZEN node, and session timestamps. Use this to see who
+    is connected to ZPA right now.
+
+    Requires ZSCALER_ZPA_CLOUD_PREFIX in .env (e.g. us4).
+    Supports JMESPath client-side filtering via the query parameter (read-only).
+    """
+    client = get_zscaler_client(service=service)
+    token = _get_bearer_token(client)
+    cloud = _get_cloud_prefix()
+    customer_id = _get_customer_id(client)
+
+    url = (
+        f"https://{cloud}-zpa-health-proxy.private.zscaler.com"
+        f"/health/{customer_id}/users"
+        f"?scopeId=0&page={page}&pagesize={page_size}"
+    )
+    data = _portal_get(url, token)
+
+    sessions = data.get("users", data)
+    total = data.get("total", None)
+
+    result = {"total": int(total) if total is not None else None, "users": sessions}
+    return apply_jmespath(result, query)
 
 
 # =============================================================================
@@ -140,10 +215,14 @@ def zpa_get_active_session_count(
 # =============================================================================
 
 def zpa_list_user_activity(
-    page: Annotated[Optional[int], Field(ge=1, description="Page number.")] = None,
-    page_size: Annotated[
-        Optional[int], Field(ge=1, le=500, description="Results per page.")
-    ] = None,
+    hours: Annotated[
+        int,
+        Field(ge=1, le=24, description="Look-back window in hours (default: 1)."),
+    ] = 1,
+    page: Annotated[
+        Optional[int],
+        Field(ge=1, description="Page number (default: 1)."),
+    ] = 1,
     query: Annotated[
         Optional[str],
         Field(description="JMESPath expression for client-side filtering."),
@@ -151,28 +230,31 @@ def zpa_list_user_activity(
     service: Annotated[str, Field(description="Service to use.")] = "zpa",
 ) -> Dict:
     """
-    List ZPA user activity records.
+    List recent ZPA user activity via the recent-activity API.
 
-    Returns a log of recent user access events — app segment accessed,
-    connector used, bytes transferred, and session duration. Use this for
-    access auditing, capacity planning, and security investigations.
+    Returns users who connected within the specified look-back window (1-24h).
+    Use for access auditing, capacity planning, and security investigations.
 
-    Supports JMESPath client-side filtering via the query parameter.
+    Requires ZSCALER_ZPA_CLOUD_PREFIX in .env (e.g. us4).
+    Supports JMESPath client-side filtering via the query parameter (read-only).
     """
     client = get_zscaler_client(service=service)
-    base = _get_zpa_base(client)
-    path = f"{base}/userActivity"
+    token = _get_bearer_token(client)
+    cloud = _get_cloud_prefix()
+    customer_id = _get_customer_id(client)
 
-    params = []
-    if page is not None:
-        params.append(f"page={page}")
-    if page_size is not None:
-        params.append(f"pagesize={page_size}")
-    if params:
-        path = f"{path}?{'&'.join(params)}"
+    now = int(time.time())
+    from_ts = now - (hours * 3600)
 
-    result = _raw_get(client, path)
-    records = result if isinstance(result, list) else result.get("list", result)
+    url = (
+        f"https://{cloud}-zpa-ras.private.zscaler.com"
+        f"/api/recent-activity/customers/{customer_id}"
+        f"/recentusers/from/{from_ts}/to/{now}"
+        f"?scopeId=0&page={page}"
+    )
+    data = _portal_get(url, token)
+
+    records = data.get("users", data)
     return apply_jmespath(records, query)
 
 
@@ -185,18 +267,36 @@ def zpa_get_user_activity(
         str,
         Field(description="The ZPA user ID to retrieve activity for."),
     ],
+    hours: Annotated[
+        int,
+        Field(ge=1, le=24, description="Look-back window in hours (default: 24)."),
+    ] = 24,
     service: Annotated[str, Field(description="Service to use.")] = "zpa",
 ) -> Dict:
     """
     Get ZPA activity records for a specific user by ID.
 
-    Returns the full activity history for a single user — which apps they
-    accessed, from which connectors, and session details. Use this when
-    investigating a specific user's ZPA access patterns.
+    Returns the full activity history for a single user over the specified
+    look-back window. Use when investigating a specific user's ZPA access
+    patterns (read-only).
+
+    Requires ZSCALER_ZPA_CLOUD_PREFIX in .env (e.g. us4).
     """
     if not user_id:
         raise ValueError("user_id is required")
 
     client = get_zscaler_client(service=service)
-    base = _get_zpa_base(client)
-    return _raw_get(client, f"{base}/userActivity/{user_id}")
+    token = _get_bearer_token(client)
+    cloud = _get_cloud_prefix()
+    customer_id = _get_customer_id(client)
+
+    now = int(time.time())
+    from_ts = now - (hours * 3600)
+
+    url = (
+        f"https://{cloud}-zpa-ras.private.zscaler.com"
+        f"/api/recent-activity/customers/{customer_id}"
+        f"/recentusers/from/{from_ts}/to/{now}"
+        f"?scopeId=0&userId={user_id}&page=1"
+    )
+    return _portal_get(url, token)

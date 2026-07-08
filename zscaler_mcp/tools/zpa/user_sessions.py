@@ -12,7 +12,8 @@ Recent-activity (time-windowed):
   Response: {"pages": 1, "totalUsers": 4, "users": [...]}
 
 These are NOT mgmtconfig endpoints — they live on separate portal service hosts.
-Auth is the same OAuth2 Bearer token the SDK obtains, extracted via create_request().
+Auth uses the same OAuth2 client credentials as the SDK, obtained independently
+via the Zscaler OneAPI token endpoint with a 55-minute TTL cache.
 
 Required .env additions:
   ZSCALER_ZPA_CLOUD_PREFIX=us4    <- cloud/region prefix for your tenant
@@ -32,6 +33,10 @@ from zscaler_mcp.common.jmespath_utils import apply_jmespath
 # =============================================================================
 # Internal helpers
 # =============================================================================
+
+# Simple in-process token cache {token, expires_at}
+_token_cache: Dict = {"token": None, "expires_at": 0}
+
 
 def _get_cloud_prefix() -> str:
     """Return the ZPA cloud prefix (e.g. 'us4') from env."""
@@ -59,57 +64,54 @@ def _get_customer_id(client) -> str:
 
 def _get_bearer_token(client) -> str:
     """
-    Extract the current OAuth2 Bearer token from the ZPA SDK client.
+    Obtain an OAuth2 Bearer token for the ZPA portal service endpoints.
 
-    Strategy (in order):
-    1. Intercept via create_request() -- uses the SDK's live auth flow,
-       guaranteed to return a valid non-expired token.
-    2. Walk common internal attribute paths across SDK versions.
-    3. Fall back to ZSCALER_ZPA_BEARER_TOKEN env var (manual override).
+    Uses the same CLIENT_ID / CLIENT_SECRET as the SDK but calls the
+    Zscaler OneAPI token endpoint directly. Token is cached for 55 minutes
+    (Zscaler tokens expire at 60 minutes).
+
+    Token endpoint: https://{ZSCALER_VANITY_DOMAIN}.zslogin.net/oauth2/v1/token
     """
-    req_exec = client.zpa._request_executor
+    global _token_cache
 
-    # Strategy 1: ask the SDK to build a lightweight request and read the header
-    try:
-        dummy_url = "/zpa/mgmtconfig/v1/admin/customers/0/applicationSegment"
-        req, error = req_exec.create_request("GET", dummy_url, {}, {})
-        if not error and req is not None:
-            headers = getattr(req, "headers", {}) or {}
-            for key, val in headers.items():
-                if key.lower() == "authorization" and val.startswith("Bearer "):
-                    return val[len("Bearer "):]
-    except Exception:
-        pass
+    # Return cached token if still valid
+    if _token_cache["token"] and time.time() < _token_cache["expires_at"]:
+        return _token_cache["token"]
 
-    # Strategy 2: common internal attribute paths across SDK versions
-    candidates = [
-        ("_access_token",),
-        ("_token",),
-        ("_http_client", "_access_token"),
-        ("_http_client", "access_token"),
-        ("_http_client", "_token"),
-        ("_auth", "_access_token"),
-    ]
-    for path in candidates:
-        try:
-            obj = req_exec
-            for attr in path:
-                obj = getattr(obj, attr)
-            if obj and isinstance(obj, str) and obj.startswith("ey"):
-                return obj
-        except AttributeError:
-            continue
+    # Read credentials from env (same values the SDK uses)
+    client_id = os.environ.get("ZSCALER_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("ZSCALER_CLIENT_SECRET", "").strip()
+    vanity_domain = os.environ.get("ZSCALER_VANITY_DOMAIN", "").strip()
 
-    # Strategy 3: manual env var fallback
-    manual = os.environ.get("ZSCALER_ZPA_BEARER_TOKEN", "").strip()
-    if manual:
-        return manual
+    if not all([client_id, client_secret, vanity_domain]):
+        raise ValueError(
+            "ZSCALER_CLIENT_ID, ZSCALER_CLIENT_SECRET, and ZSCALER_VANITY_DOMAIN "
+            "must all be set in your .env file."
+        )
 
-    raise RuntimeError(
-        "Could not extract Bearer token from ZPA SDK. "
-        "Set ZSCALER_ZPA_BEARER_TOKEN in your .env as a fallback, "
-        "or open a GitHub issue with your SDK version."
+    token_url = f"https://{vanity_domain}.zslogin.net/oauth2/v1/token"
+
+    resp = requests.post(
+        token_url,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
     )
+    resp.raise_for_status()
+
+    token_data = resp.json()
+    token = token_data["access_token"]
+    expires_in = token_data.get("expires_in", 3600)
+
+    # Cache with 55-minute TTL regardless of actual expiry
+    _token_cache["token"] = token
+    _token_cache["expires_at"] = time.time() + min(expires_in - 300, 3300)
+
+    return token
 
 
 def _portal_get(url: str, token: str) -> Dict:

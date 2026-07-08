@@ -245,16 +245,22 @@ def zpa_list_user_activity(
     cloud = _get_cloud_prefix()
     customer_id = _get_customer_id(client)
 
-    now = int(time.time())
-    from_ts = now - (hours * 3600)
+    now_ms = int(time.time() * 1000)
+    from_ms = now_ms - (hours * 3600 * 1000)
 
     url = (
         f"https://{cloud}-zpa-ras.private.zscaler.com"
         f"/api/recent-activity/customers/{customer_id}"
-        f"/recentusers/from/{from_ts}/to/{now}"
-        f"?scopeId=0&page={page}"
+        f"/recentusers/from/{from_ms}/to/{now_ms}"
+        f"?page={page}"
     )
-    data = _portal_get(url, token)
+    try:
+        data = _portal_get(url, token)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 400:
+            # RAS API returns 400 when no activity exists in the window
+            return {"totalUsers": 0, "pages": 0, "users": []}
+        raise
 
     records = data.get("users", data)
     return apply_jmespath(records, query)
@@ -292,13 +298,13 @@ def zpa_get_user_activity(
     cloud = _get_cloud_prefix()
     customer_id = _get_customer_id(client)
 
-    now = int(time.time())
-    from_ts = now - (hours * 3600)
+    now_ms = int(time.time() * 1000)
+    from_ms = now_ms - (hours * 3600 * 1000)
 
     url = (
         f"https://{cloud}-zpa-ras.private.zscaler.com"
         f"/api/recent-activity/customers/{customer_id}"
-        f"/recentusers/from/{from_ts}/to/{now}"
-        f"?scopeId=0&userId={user_id}&page=1"
+        f"/recentusers/from/{from_ms}/to/{now_ms}"
+        f"?userId={user_id}&page=1"
     )
     return _portal_get(url, token)

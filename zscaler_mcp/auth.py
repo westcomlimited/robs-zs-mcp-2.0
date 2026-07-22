@@ -84,6 +84,12 @@ def _build_token_url(vanity_domain: str, cloud: str = "production") -> str:
     cache-lookup keys and direct fetch URLs stay in lock-step.
     """
     cloud = (cloud or "production").lower().strip()
+    # Normalize full Zscaler cloud domain (e.g. ZSCALER_CLOUD=zscloud.net) to the
+    # zslogin URL suffix. zscloud.net is production; zscaler{x}.net maps to suffix x.
+    if cloud == "zscloud.net":
+        cloud = "production"
+    elif cloud.endswith(".net") and cloud.startswith("zscaler"):
+        cloud = cloud[len("zscaler"):-len(".net")]
     if cloud == "production":
         return f"https://{vanity_domain}.zslogin.net/oauth2/v1/token"
     return f"https://{vanity_domain}.zslogin{cloud}.net/oauth2/v1/token"
@@ -437,9 +443,14 @@ class ZscalerAuthProvider(AuthProvider):
         return "Basic"
 
     def _build_token_url(self) -> str:
-        if self._cloud == "production":
+        cloud = (self._cloud or "production").lower().strip()
+        if cloud == "zscloud.net":
+            cloud = "production"
+        elif cloud.endswith(".net") and cloud.startswith("zscaler"):
+            cloud = cloud[len("zscaler"):-len(".net")]
+        if cloud == "production":
             return f"https://{self._vanity_domain}.zslogin.net/oauth2/v1/token"
-        return f"https://{self._vanity_domain}.zslogin{self._cloud}.net/oauth2/v1/token"
+        return f"https://{self._vanity_domain}.zslogin{cloud}.net/oauth2/v1/token"
 
     @staticmethod
     def _credential_hash(client_id: str, client_secret: str) -> str:

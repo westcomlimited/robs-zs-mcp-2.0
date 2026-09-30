@@ -36,13 +36,13 @@ def zins_get_web_traffic_by_location(
     start_days_ago: Annotated[
         int,
         Field(
-            description="Days ago for start. Default: 9 (7-day interval with end=2). "
-            "API requires intervals of exactly 7 or 14 days. For 14-day use 16."
+            description="Days ago for start. Default: 9 (7-day window with end=2). "
+            "Any window length works, e.g. start=3, end=2 for a single day."
         ),
     ] = 9,
     end_days_ago: Annotated[
         int,
-        Field(description="Days ago for end. Default: 2. Interval = start - end must be 7 or 14."),
+        Field(description="Days ago for end. Default: 2. Minimum 1 (data must be at least 24h old)."),
     ] = 2,
     start_time: Annotated[
         Optional[int],
@@ -117,7 +117,8 @@ def zins_get_web_traffic_by_location(
     """
     # Resolve time parameters (supports both days_ago and epoch ms)
     resolved_start, resolved_end = resolve_time_params(
-        start_time, end_time, start_days_ago, end_days_ago
+        start_time, end_time, start_days_ago, end_days_ago,
+        auto_adjust_interval=False,  # web/firewall accept any window length (verified 2026-09-30)
     )
 
     # Validate inputs
@@ -170,13 +171,13 @@ def zins_get_web_traffic_no_grouping(
     start_days_ago: Annotated[
         int,
         Field(
-            description="Days ago for start. Default: 9 (7-day interval). "
-            "API requires intervals of exactly 7 or 14 days."
+            description="Days ago for start. Default: 9 (7-day window). "
+            "Any window length works, e.g. start=3, end=2 for a single day."
         ),
     ] = 9,
     end_days_ago: Annotated[
         int,
-        Field(description="Days ago for end. Default: 2. Interval = start - end must be 7 or 14."),
+        Field(description="Days ago for end. Default: 2. Minimum 1 (data must be at least 24h old)."),
     ] = 2,
     start_time: Annotated[
         Optional[int],
@@ -233,7 +234,8 @@ def zins_get_web_traffic_no_grouping(
     """
     # Resolve time parameters
     resolved_start, resolved_end = resolve_time_params(
-        start_time, end_time, start_days_ago, end_days_ago
+        start_time, end_time, start_days_ago, end_days_ago,
+        auto_adjust_interval=False,  # web/firewall accept any window length (verified 2026-09-30)
     )
 
     # Validate inputs
@@ -291,12 +293,12 @@ def zins_get_web_protocols(
     start_days_ago: Annotated[
         int,
         Field(
-            description="Days ago for start. Default: 9 (7-day interval). API needs 7 or 14 day intervals."
+            description="Days ago for start. Default: 9 (7-day window). Any window length works, e.g. start=3, end=2 for a single day."
         ),
     ] = 9,
     end_days_ago: Annotated[
         int,
-        Field(description="Days ago for end. Default: 2. Interval = start - end must be 7 or 14."),
+        Field(description="Days ago for end. Default: 2. Minimum 1 (data must be at least 24h old)."),
     ] = 2,
     start_time: Annotated[
         Optional[int],
@@ -329,7 +331,8 @@ def zins_get_web_protocols(
     """
     # Resolve time parameters
     resolved_start, resolved_end = resolve_time_params(
-        start_time, end_time, start_days_ago, end_days_ago
+        start_time, end_time, start_days_ago, end_days_ago,
+        auto_adjust_interval=False,  # web/firewall accept any window length (verified 2026-09-30)
     )
 
     # Validate inputs
@@ -372,12 +375,12 @@ def zins_get_threat_super_categories(
     start_days_ago: Annotated[
         int,
         Field(
-            description="Days ago for start. Default: 9 (7-day interval). API needs 7 or 14 day intervals."
+            description="Days ago for start. Default: 9 (7-day window). Any window length works, e.g. start=3, end=2 for a single day."
         ),
     ] = 9,
     end_days_ago: Annotated[
         int,
-        Field(description="Days ago for end. Default: 2. Interval = start - end must be 7 or 14."),
+        Field(description="Days ago for end. Default: 2. Minimum 1 (data must be at least 24h old)."),
     ] = 2,
     start_time: Annotated[
         Optional[int],
@@ -410,7 +413,8 @@ def zins_get_threat_super_categories(
     """
     # Resolve time parameters
     resolved_start, resolved_end = resolve_time_params(
-        start_time, end_time, start_days_ago, end_days_ago
+        start_time, end_time, start_days_ago, end_days_ago,
+        auto_adjust_interval=False,  # web/firewall accept any window length (verified 2026-09-30)
     )
 
     # Validate inputs
@@ -459,12 +463,12 @@ def zins_get_threat_class(
     start_days_ago: Annotated[
         int,
         Field(
-            description="Days ago for start. Default: 9 (7-day interval). API needs 7 or 14 day intervals."
+            description="Days ago for start. Default: 9 (7-day window). Any window length works, e.g. start=3, end=2 for a single day."
         ),
     ] = 9,
     end_days_ago: Annotated[
         int,
-        Field(description="Days ago for end. Default: 2. Interval = start - end must be 7 or 14."),
+        Field(description="Days ago for end. Default: 2. Minimum 1 (data must be at least 24h old)."),
     ] = 2,
     start_time: Annotated[
         Optional[int],
@@ -497,7 +501,8 @@ def zins_get_threat_class(
     """
     # Resolve time parameters
     resolved_start, resolved_end = resolve_time_params(
-        start_time, end_time, start_days_ago, end_days_ago
+        start_time, end_time, start_days_ago, end_days_ago,
+        auto_adjust_interval=False,  # web/firewall accept any window length (verified 2026-09-30)
     )
 
     # Validate inputs

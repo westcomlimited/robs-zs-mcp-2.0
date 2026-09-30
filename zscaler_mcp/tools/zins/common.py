@@ -177,8 +177,11 @@ def resolve_time_params(
         # Use default end (2 days ago - minimum for data availability)
         resolved_end = calculate_epoch_ms(default_end_days)
 
-    # Auto-adjust interval to valid 7 or 14 days if enabled
-    # Z-Insights API requires time intervals of exactly 7 or 14 days
+    # Auto-adjust interval to valid 7 or 14 days if enabled.
+    # Not every Z-Insights query needs this: WEB_TRAFFIC and ZERO_TRUST_FIREWALL
+    # accept any window (1-30 days tested 2026-09-30), so those tools pass
+    # auto_adjust_interval=False. SHADOW_IT failed on 2/3/5/10/12/20-day windows
+    # (only 1/7/14/30 worked), so the others keep the adjustment.
     if auto_adjust_interval and start_time is None and end_time is None:
         ms_per_day = 24 * 60 * 60 * 1000
         interval_ms = resolved_end - resolved_start
